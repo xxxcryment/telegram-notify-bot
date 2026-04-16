@@ -24,9 +24,6 @@ if not TOKEN:
 if not CENTRAL_WEBHOOK_URL:
     logger.warning("⚠️ CENTRAL_WEBHOOK_URL не установлен")
 
-# Хранилище подписчиков в памяти (как кэш)
-subscribers = set()
-
 # ==================== КОМАНДЫ ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,28 +46,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 result = response.json()
                 if result.get("status") == "ok":
-                    subscribers.add(chat_id)
                     logger.info(f"✅ Новый подписчик: {chat_id} (@{username})")
-                else:
-                    logger.error(f"Ошибка добавления: {result}")
         except Exception as e:
             logger.error(f"Ошибка: {e}")
-    else:
-        subscribers.add(chat_id)
     
-    # Клавиатура с кнопками снизу
+    # Клавиатура с кнопками (3 ряда по 2 кнопки + помощь)
     keyboard = [
-        [InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily")],
-        [InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")],
-        [InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers")],
-        [InlineKeyboardButton("📋 Все последние файлы", callback_data="all_backups")],
-        [InlineKeyboardButton("❓ Помощь", callback_data="help")]
+        [
+            InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily"),
+            InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")
+        ],
+        [
+            InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers"),
+            InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")
+        ],
+        [
+            InlineKeyboardButton("❓ Помощь", callback_data="help")
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "✅ Вы подписаны на уведомления!\n\n"
-        "📋 Я буду присылать уведомления, когда обновляются таблицы.\n\n"
+        "✅ <b>Вы подписаны на уведомления!</b>\n\n"
+        "Я буду присылать уведомления, когда обновляются таблицы.\n\n"
         "👇 <b>Кнопки для быстрого доступа к последним файлам:</b>",
         parse_mode="HTML",
         reply_markup=reply_markup
@@ -88,16 +86,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ежедневный ABC - последние 5 копий\n"
         "• Еженедельный ABC - последние 5 копий\n"
         "• Предложения цен - последние 5 копий\n"
-        "• Все файлы - все последние копии\n\n"
-        "🔔 <b>Уведомления:</b>\n"
-        "Вы будете получать уведомления при обновлении таблиц"
+        "• Все файлы - все последние копии"
     )
     
     keyboard = [
-        [InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily")],
-        [InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")],
-        [InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers")],
-        [InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")]
+        [
+            InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily"),
+            InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")
+        ],
+        [
+            InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers"),
+            InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")
+        ],
+        [
+            InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_start")
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -106,10 +109,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def last_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать кнопки с последними файлами"""
     keyboard = [
-        [InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily")],
-        [InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")],
-        [InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers")],
-        [InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")]
+        [
+            InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily"),
+            InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")
+        ],
+        [
+            InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers"),
+            InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")
+        ],
+        [
+            InlineKeyboardButton("❓ Помощь", callback_data="help")
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -128,6 +138,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     callback_data = query.data
     
+    # Обработка кнопки "Назад в меню"
+    if callback_data == "back_to_start":
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily"),
+                InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")
+            ],
+            [
+                InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers"),
+                InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")
+            ],
+            [
+                InlineKeyboardButton("❓ Помощь", callback_data="help")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "👇 <b>Выберите тип файлов для просмотра последних копий:</b>",
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+        return
+    
     if callback_data == "help":
         help_text = (
             "🤖 <b>Помощь по боту</b>\n\n"
@@ -141,7 +174,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Предложения цен - последние 5 копий\n"
             "• Все файлы - все последние копии"
         )
-        await query.edit_message_text(help_text, parse_mode="HTML")
+        keyboard = [
+            [InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(help_text, parse_mode="HTML", reply_markup=reply_markup)
         return
     
     # Названия типов
@@ -205,7 +242,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 message += f"{i}. <a href='{file.get('url')}'>{file.get('name')}</a>\n"
                         
                         # Добавляем кнопку "Назад" в конец сообщения
-                        keyboard = [[InlineKeyboardButton("◀️ Назад к выбору", callback_data="back_to_menu")]]
+                        keyboard = [[InlineKeyboardButton("◀️ Назад к выбору", callback_data="back_to_start")]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         
                         await query.edit_message_text(
@@ -215,7 +252,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             disable_web_page_preview=True
                         )
                     else:
-                        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
+                        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         await query.edit_message_text(
                             f"❌ Нет сохраненных копий для {type_name}",
