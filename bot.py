@@ -6,8 +6,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import Response, PlainTextResponse
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,8 +57,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result = response.json()
                 if result.get("status") == "ok":
                     logger.info(f"✅ Новый подписчик: {chat_id} (@{username})")
+                else:
+                    logger.error(f"Ошибка добавления: {result}")
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
+            logger.error(f"Ошибка при добавлении подписчика: {e}")
     
     await update.message.reply_text(
         "✅ <b>Вы подписаны на уведомления!</b>\n\n"
@@ -72,6 +74,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка нажатий на кнопки постоянной клавиатуры"""
     text = update.message.text
     chat_id = update.effective_chat.id
+    
+    logger.info(f"Получено сообщение: {text} от {chat_id}")
     
     if text == "📊 Ежедневный ABC":
         await get_files_by_type(update, "abc_daily", "📊 Ежедневный ABC-анализ")
@@ -119,11 +123,18 @@ async def get_files_by_type(update, file_type, type_name):
                 }
             )
             
+            logger.info(f"Статус ответа вебхука: {response.status_code}")
+            logger.info(f"Тело ответа: {response.text[:200]}")
+            
             if response.status_code != 200:
                 await msg.edit_text(f"❌ Ошибка: HTTP {response.status_code}")
                 return
             
-            result = response.json()
+            try:
+                result = response.json()
+            except Exception as json_err:
+                await msg.edit_text(f"❌ Ошибка парсинга JSON: {str(json_err)[:100]}\n\nОтвет: {response.text[:200]}")
+                return
             
             if result.get("status") == "ok":
                 files = result.get("files", [])
@@ -157,10 +168,10 @@ async def get_files_by_type(update, file_type, type_name):
     except httpx.TimeoutException:
         await msg.edit_text("❌ Ошибка: Время ожидания истекло")
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"Ошибка в get_files_by_type: {e}")
         await msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
-async def show_help(update):
+async def show_help(update: Update):
     """Показать справку"""
     help_text = (
         "🤖 <b>Помощь по боту</b>\n\n"
@@ -179,7 +190,7 @@ async def show_help(update):
     )
     await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-async def show_stats(update):
+async def show_stats(update: Update):
     """Показать статистику"""
     if not CENTRAL_WEBHOOK_URL:
         await update.message.reply_text("❌ Статистика временно недоступна", reply_markup=get_main_keyboard())
@@ -197,16 +208,16 @@ async def show_stats(update):
                 stats_text = (
                     "📊 <b>Статистика бота</b>\n\n"
                     f"👥 Подписчиков: {result.get('subscribers_count', 0)}\n"
-                    f"📁 Всего копий: {result.get('backups_count', 0)}\n"
-                    f"📅 Последнее обновление: {result.get('last_update', 'неизвестно')}"
+                    f"📁 Всего копий: {result.get('backups_count', 0)}"
                 )
                 await update.message.reply_text(stats_text, parse_mode="HTML", reply_markup=get_main_keyboard())
             else:
                 await update.message.reply_text("❌ Ошибка получения статистики", reply_markup=get_main_keyboard())
     except Exception as e:
+        logger.error(f"Ошибка в show_stats: {e}")
         await update.message.reply_text(f"❌ Ошибка: {str(e)[:100]}", reply_markup=get_main_keyboard())
 
-async def show_about(update):
+async def show_about(update: Update):
     """Информация о боте"""
     about_text = (
         "ℹ️ <b>О боте</b>\n\n"
@@ -220,20 +231,43 @@ async def show_about(update):
     )
     await update.message.reply_text(about_text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-# ==================== ОБРАБОТКА INLINE КНОПОК (если нужны) ====================
+# ==================== ТЕСТОВАЯ КОМАНДА ДЛЯ ДИАГНОСТИКИ ====================
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка inline кнопок (если используете)"""
-    query = update.callback_query
-    await query.answer()
+async def test_webhook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тест вебхука (только для админа)"""
+    chat_id = update.effective_chat.id
     
-    callback_data = query.data
+    if chat_id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа")
+        return
     
-    if callback_data == "back_to_start":
-        await query.edit_message_text(
-            "👇 Используйте кнопки внизу для навигации:",
-            reply_markup=get_main_keyboard()
-        )
+    if not CENTRAL_WEBHOOK_URL:
+        await update.message.reply_text("❌ CENTRAL_WEBHOOK_URL не настроен")
+        return
+    
+    await update.message.reply_text("🔍 Отправляю тестовый запрос...")
+    
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+            # Тест с правильным action
+            response = await client.post(
+                CENTRAL_WEBHOOK_URL,
+                json={
+                    "action": "get_last_files",
+                    "file_type": "abc_daily"
+                }
+            )
+            
+            message = f"📡 <b>Результат теста</b>\n\n"
+            message += f"Статус: {response.status_code}\n"
+            message += f"Тип содержимого: {response.headers.get('content-type', 'unknown')}\n\n"
+            message += f"<b>Ответ:</b>\n"
+            message += f"<code>{response.text[:500]}</code>"
+            
+            await update.message.reply_text(message, parse_mode="HTML")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 # ==================== ЗАПУСК БОТА ====================
 
@@ -243,8 +277,8 @@ async def main():
     # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", show_help))
+    app.add_handler(CommandHandler("test", test_webhook))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(button_callback))
     
     render_url = os.environ.get("RENDER_EXTERNAL_URL")
     if not render_url:
