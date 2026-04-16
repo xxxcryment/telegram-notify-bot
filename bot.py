@@ -6,8 +6,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import Response, PlainTextResponse
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,7 +24,18 @@ if not TOKEN:
 if not CENTRAL_WEBHOOK_URL:
     logger.warning("⚠️ CENTRAL_WEBHOOK_URL не установлен")
 
-# ==================== КОМАНДЫ ====================
+# ==================== ПОСТОЯННАЯ КЛАВИАТУРА ВНИЗУ ====================
+def get_main_keyboard():
+    """Создает постоянную клавиатуру внизу экрана"""
+    keyboard = [
+        [KeyboardButton("📊 Ежедневный ABC"), KeyboardButton("📈 Еженедельный ABC")],
+        [KeyboardButton("💰 Предложения цен"), KeyboardButton("📋 Все файлы")],
+        [KeyboardButton("❓ Помощь"), KeyboardButton("📊 Статистика")],
+        [KeyboardButton("ℹ️ О боте")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# ==================== КОМАНДЫ И ОБРАБОТЧИКИ ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Подписка на уведомления"""
@@ -34,15 +45,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Добавляем подписчика через центральный вебхук
     if CENTRAL_WEBHOOK_URL:
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
                 response = await client.post(
                     CENTRAL_WEBHOOK_URL,
                     json={
                         "action": "add_subscriber",
                         "chat_id": chat_id,
                         "username": username
-                    },
-                    timeout=10.0
+                    }
                 )
                 result = response.json()
                 if result.get("status") == "ok":
@@ -50,234 +60,190 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка: {e}")
     
-    # Клавиатура с кнопками (3 ряда по 2 кнопки + помощь)
-    keyboard = [
-        [
-            InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily"),
-            InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")
-        ],
-        [
-            InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers"),
-            InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")
-        ],
-        [
-            InlineKeyboardButton("❓ Помощь", callback_data="help")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(
         "✅ <b>Вы подписаны на уведомления!</b>\n\n"
         "Я буду присылать уведомления, когда обновляются таблицы.\n\n"
-        "👇 <b>Кнопки для быстрого доступа к последним файлам:</b>",
+        "👇 <b>Кнопки внизу для быстрого доступа к файлам:</b>",
         parse_mode="HTML",
-        reply_markup=reply_markup
+        reply_markup=get_main_keyboard()
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Помощь"""
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий на кнопки постоянной клавиатуры"""
+    text = update.message.text
+    chat_id = update.effective_chat.id
+    
+    if text == "📊 Ежедневный ABC":
+        await get_files_by_type(update, "abc_daily", "📊 Ежедневный ABC-анализ")
+    
+    elif text == "📈 Еженедельный ABC":
+        await get_files_by_type(update, "abc_weekly", "📈 Еженедельный ABC-анализ")
+    
+    elif text == "💰 Предложения цен":
+        await get_files_by_type(update, "price_offers", "💰 Предложения цен")
+    
+    elif text == "📋 Все файлы":
+        await get_files_by_type(update, "all", "📋 Все последние файлы")
+    
+    elif text == "❓ Помощь":
+        await show_help(update)
+    
+    elif text == "📊 Статистика":
+        await show_stats(update)
+    
+    elif text == "ℹ️ О боте":
+        await show_about(update)
+    
+    else:
+        await update.message.reply_text(
+            "Используйте кнопки внизу для навигации 👇",
+            reply_markup=get_main_keyboard()
+        )
+
+async def get_files_by_type(update, file_type, type_name):
+    """Получение и отправка файлов по типу"""
+    # Отправляем сообщение о загрузке
+    msg = await update.message.reply_text(f"⏳ Загружаю {type_name}...\n\nПожалуйста, подождите.")
+    
+    if not CENTRAL_WEBHOOK_URL:
+        await msg.edit_text("❌ Центральный вебхук не настроен")
+        return
+    
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            response = await client.post(
+                CENTRAL_WEBHOOK_URL,
+                json={
+                    "action": "get_last_files",
+                    "file_type": file_type
+                }
+            )
+            
+            if response.status_code != 200:
+                await msg.edit_text(f"❌ Ошибка: HTTP {response.status_code}")
+                return
+            
+            result = response.json()
+            
+            if result.get("status") == "ok":
+                files = result.get("files", [])
+                
+                if files:
+                    if file_type == "all":
+                        message = "📁 <b>Последние файлы по категориям:</b>\n\n"
+                        current_type = ""
+                        for file in files:
+                            type_display = {
+                                "abc_daily": "📊 Ежедневный ABC:",
+                                "abc_weekly": "📈 Еженедельный ABC:",
+                                "price_offers": "💰 Предложения цен:"
+                            }.get(file.get('type'), f"{file.get('type')}:")
+                            
+                            if file.get('type') != current_type:
+                                current_type = file.get('type')
+                                message += f"\n<b>{type_display}</b>\n"
+                            message += f"• <a href='{file.get('url')}'>{file.get('name')}</a>\n"
+                    else:
+                        message = f"📁 <b>{type_name} - последние файлы:</b>\n\n"
+                        for i, file in enumerate(files, 1):
+                            message += f"{i}. <a href='{file.get('url')}'>{file.get('name')}</a>\n"
+                    
+                    await msg.edit_text(message, parse_mode="HTML", disable_web_page_preview=True)
+                else:
+                    await msg.edit_text(f"❌ Нет сохраненных копий для {type_name}")
+            else:
+                await msg.edit_text(f"❌ Ошибка: {result.get('message', 'Неизвестная ошибка')}")
+                
+    except httpx.TimeoutException:
+        await msg.edit_text("❌ Ошибка: Время ожидания истекло")
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+        await msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+
+async def show_help(update):
+    """Показать справку"""
     help_text = (
         "🤖 <b>Помощь по боту</b>\n\n"
-        "📌 <b>Доступные команды:</b>\n"
-        "/start - Подписаться на уведомления\n"
-        "/help - Показать эту справку\n"
-        "/last - Показать кнопки с последними файлами\n\n"
-        "📊 <b>Кнопки с файлами:</b>\n"
+        "📌 <b>Доступные кнопки внизу:</b>\n"
         "• Ежедневный ABC - последние 5 копий\n"
         "• Еженедельный ABC - последние 5 копий\n"
         "• Предложения цен - последние 5 копий\n"
-        "• Все файлы - все последние копии"
+        "• Все файлы - все последние копии\n"
+        "• Статистика - количество подписчиков\n"
+        "• О боте - информация о боте\n\n"
+        "📌 <b>Команды:</b>\n"
+        "/start - Перезапустить бота\n"
+        "/help - Показать эту справку\n\n"
+        "🔔 <b>Уведомления:</b>\n"
+        "Вы будете получать уведомления при обновлении таблиц"
     )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily"),
-            InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")
-        ],
-        [
-            InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers"),
-            InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")
-        ],
-        [
-            InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_start")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=reply_markup)
+    await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-async def last_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать кнопки с последними файлами"""
-    keyboard = [
-        [
-            InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily"),
-            InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")
-        ],
-        [
-            InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers"),
-            InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")
-        ],
-        [
-            InlineKeyboardButton("❓ Помощь", callback_data="help")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+async def show_stats(update):
+    """Показать статистику"""
+    if not CENTRAL_WEBHOOK_URL:
+        await update.message.reply_text("❌ Статистика временно недоступна", reply_markup=get_main_keyboard())
+        return
     
-    await update.message.reply_text(
-        "👇 <b>Выберите тип файлов для просмотра последних копий:</b>",
-        parse_mode="HTML",
-        reply_markup=reply_markup
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+            response = await client.post(
+                CENTRAL_WEBHOOK_URL,
+                json={"action": "get_stats"}
+            )
+            result = response.json()
+            
+            if result.get("status") == "ok":
+                stats_text = (
+                    "📊 <b>Статистика бота</b>\n\n"
+                    f"👥 Подписчиков: {result.get('subscribers_count', 0)}\n"
+                    f"📁 Всего копий: {result.get('backups_count', 0)}\n"
+                    f"📅 Последнее обновление: {result.get('last_update', 'неизвестно')}"
+                )
+                await update.message.reply_text(stats_text, parse_mode="HTML", reply_markup=get_main_keyboard())
+            else:
+                await update.message.reply_text("❌ Ошибка получения статистики", reply_markup=get_main_keyboard())
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {str(e)[:100]}", reply_markup=get_main_keyboard())
+
+async def show_about(update):
+    """Информация о боте"""
+    about_text = (
+        "ℹ️ <b>О боте</b>\n\n"
+        "🤖 Бот для уведомлений об обновлении таблиц\n\n"
+        "📊 <b>Функции:</b>\n"
+        "• Уведомления о новых копиях таблиц\n"
+        "• Быстрый доступ к последним файлам\n"
+        "• Статистика подписчиков\n\n"
+        "📡 <b>Версия:</b> 2.0\n"
+        "🕒 <b>Последнее обновление:</b> Апрель 2026"
     )
+    await update.message.reply_text(about_text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-# ==================== ОБРАБОТКА КНОПОК ====================
+# ==================== ОБРАБОТКА INLINE КНОПОК (если нужны) ====================
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий на кнопки"""
+    """Обработка inline кнопок (если используете)"""
     query = update.callback_query
     await query.answer()
     
     callback_data = query.data
     
-    # Обработка кнопки "Назад в меню"
     if callback_data == "back_to_start":
-        keyboard = [
-            [
-                InlineKeyboardButton("📊 Ежедневный ABC", callback_data="abc_daily"),
-                InlineKeyboardButton("📈 Еженедельный ABC", callback_data="abc_weekly")
-            ],
-            [
-                InlineKeyboardButton("💰 Предложения цен", callback_data="price_offers"),
-                InlineKeyboardButton("📋 Все файлы", callback_data="all_backups")
-            ],
-            [
-                InlineKeyboardButton("❓ Помощь", callback_data="help")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "👇 <b>Выберите тип файлов для просмотра последних копий:</b>",
-            parse_mode="HTML",
-            reply_markup=reply_markup
+            "👇 Используйте кнопки внизу для навигации:",
+            reply_markup=get_main_keyboard()
         )
-        return
-    
-    if callback_data == "help":
-        help_text = (
-            "🤖 <b>Помощь по боту</b>\n\n"
-            "📌 <b>Доступные команды:</b>\n"
-            "/start - Подписаться на уведомления\n"
-            "/help - Показать эту справку\n"
-            "/last - Показать кнопки с последними файлами\n\n"
-            "📊 <b>Кнопки с файлами:</b>\n"
-            "• Ежедневный ABC - последние 5 копий\n"
-            "• Еженедельный ABC - последние 5 копий\n"
-            "• Предложения цен - последние 5 копий\n"
-            "• Все файлы - все последние копии"
-        )
-        keyboard = [
-            [InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_start")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(help_text, parse_mode="HTML", reply_markup=reply_markup)
-        return
-    
-    # Названия типов
-    type_names = {
-        "abc_daily": "📊 Ежедневный ABC-анализ",
-        "abc_weekly": "📈 Еженедельный ABC-анализ",
-        "price_offers": "💰 Предложения цен",
-        "all_backups": "📋 Все последние файлы"
-    }
-    
-    type_name = type_names.get(callback_data, "Файлы")
-    
-    # Показываем сообщение о загрузке
-    await query.edit_message_text(
-        f"⏳ Загружаю {type_name}...\n\nПожалуйста, подождите..."
-    )
-    
-    # Определяем file_type для запроса
-    file_type = callback_data if callback_data != "all_backups" else "all"
-    
-    # Отправляем запрос в центральный вебхук
-    if CENTRAL_WEBHOOK_URL:
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    CENTRAL_WEBHOOK_URL,
-                    json={
-                        "action": "get_last_files",
-                        "file_type": file_type
-                    },
-                    timeout=15.0
-                )
-                
-                if response.status_code != 200:
-                    await query.edit_message_text(f"❌ Ошибка: HTTP {response.status_code}")
-                    return
-                
-                result = response.json()
-                
-                if result.get("status") == "ok":
-                    files = result.get("files", [])
-                    
-                    if files:
-                        if callback_data == "all_backups":
-                            message = "📁 <b>Последние файлы по категориям:</b>\n\n"
-                            current_type = ""
-                            for file in files:
-                                type_display = {
-                                    "abc_daily": "📊 Ежедневный ABC:",
-                                    "abc_weekly": "📈 Еженедельный ABC:",
-                                    "price_offers": "💰 Предложения цен:"
-                                }.get(file.get('type'), f"{file.get('type')}:")
-                                
-                                if file.get('type') != current_type:
-                                    current_type = file.get('type')
-                                    message += f"\n<b>{type_display}</b>\n"
-                                message += f"• <a href='{file.get('url')}'>{file.get('name')}</a>\n"
-                        else:
-                            message = f"📁 <b>{type_name} - последние файлы:</b>\n\n"
-                            for i, file in enumerate(files, 1):
-                                message += f"{i}. <a href='{file.get('url')}'>{file.get('name')}</a>\n"
-                        
-                        # Добавляем кнопку "Назад" в конец сообщения
-                        keyboard = [[InlineKeyboardButton("◀️ Назад к выбору", callback_data="back_to_start")]]
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        
-                        await query.edit_message_text(
-                            message, 
-                            parse_mode="HTML",
-                            reply_markup=reply_markup,
-                            disable_web_page_preview=True
-                        )
-                    else:
-                        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        await query.edit_message_text(
-                            f"❌ Нет сохраненных копий для {type_name}",
-                            reply_markup=reply_markup
-                        )
-                else:
-                    await query.edit_message_text(f"❌ Ошибка: {result.get('message', 'Неизвестная ошибка')}")
-                    
-        except httpx.TimeoutException:
-            logger.error("Таймаут запроса")
-            await query.edit_message_text("❌ Ошибка: Время ожидания истекло")
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            await query.edit_message_text(f"❌ Ошибка: {str(e)[:100]}")
-    else:
-        await query.edit_message_text("❌ Центральный вебхук не настроен")
 
 # ==================== ЗАПУСК БОТА ====================
 
 async def main():
     app = Application.builder().token(TOKEN).updater(None).build()
     
+    # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("last", last_command))
+    app.add_handler(CommandHandler("help", show_help))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_callback))
     
     render_url = os.environ.get("RENDER_EXTERNAL_URL")
